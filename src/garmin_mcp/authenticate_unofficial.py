@@ -30,7 +30,7 @@ from getpass import getpass
 
 from garminconnect import Garmin
 
-from .auth import DEFAULT_TOKENSTORE
+from .auth_unofficial import DEFAULT_TOKENSTORE
 
 
 def _ask_mfa_code() -> str:
