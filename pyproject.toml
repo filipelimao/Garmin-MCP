@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "garmin-connect-mcp"
+version = "0.1.0"
+description = "MCP server exposing your own Garmin Connect activity, health, and training data to Claude"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Limão" }]
+dependencies = [
+    "mcp>=2.0.0,<3.0.0",
+    "garminconnect>=0.2.20",
+]
+
+[project.scripts]
+garmin-mcp-server = "garmin_mcp.server:main"
+garmin-mcp-auth = "garmin_mcp.authenticate:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/garmin_mcp"]
