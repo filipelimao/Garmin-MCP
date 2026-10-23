@@ -66,6 +66,26 @@ The 23 official tools work completely independently of it; the 11
 unofficial tools will return a clear `{"error": ...}` telling you (or
 Claude) that they need it, instead of failing silently.
 
+## Two ways to run this
+
+| | `garmin-mcp-server` (local) | `garmin-mcp-remote-server` (remote) |
+|---|---|---|
+| Transport | stdio | HTTP (Streamable HTTP) |
+| Where it runs | your own machine | anywhere public (Railway, etc.) |
+| Reachable from | Claude Desktop/Cursor on that machine only | claude.ai on **any device**, including your phone |
+| Tools | all 34 (23 official + 11 unofficial) | **23 official only** — no unofficial fallback |
+| Your Garmin password | only touches `garmin-mcp-auth`, run by hand | **never** — this server doesn't have the code path at all |
+| Access control | whoever has your machine | OAuth2 + a password you set (`GARMIN_MCP_ACCESS_PASSWORD`) |
+
+Use the local server if you only ever use Claude Desktop/Cursor on one
+machine and want every tool, unofficial fallback included. Use the
+remote server if you want this to work from claude.ai on your phone too
+— the trade-off is giving up the 11 unofficial-fallback tools (training
+status/readiness, VO2 max, race predictions, personal records, devices,
+activity splits/laps/weather/gear, respiration) on that path, since
+hosting the unofficial login anywhere but your own machine is the one
+thing this project won't do. Nothing stops you running both at once.
+
 ## Setup
 
 Requires Python 3.10+ (the official Garmin package needs 3.12+; if
@@ -137,6 +157,68 @@ cached session instead, run `garmin-mcp-auth --logout`.
 Replace `/absolute/path/to/garmin-connect-mcp` with wherever you cloned
 this repo. Restart the client afterward so it picks up the new server.
 
+## Remote server (phone-reachable)
+
+This deploys `garmin-mcp-remote-server` — the 23-official-tools-only,
+HTTP variant — somewhere public, then adds it to claude.ai as a custom
+connector so it works from any device, phone included.
+
+### 1. Deploy to Railway
+
+1. Push this repo to GitHub (it already has a `Dockerfile` Railway will
+   auto-detect — no other config needed).
+2. In [Railway](https://railway.app), **New Project → Deploy from GitHub
+   repo** → pick this repo.
+3. Under the service's **Variables**, set:
+   - `GARMIN_PERSONAL_API_KEY` — your Garmin Personal API key (same key
+     as the local setup's step 1, pasted directly as a secret env var —
+     there's no terminal here to run `garmin-mcp-save-key`).
+   - `GARMIN_MCP_ACCESS_PASSWORD` — a password *you* invent for this
+     server. It's unrelated to your Garmin password and this server
+     never sees your Garmin password at all; this is the one secret that
+     decides who can get a token and call your tools.
+   - `GARMIN_MCP_PUBLIC_URL` — leave this for step 4, once Railway has
+     assigned a domain.
+4. Railway builds and deploys; under **Settings → Networking**, click
+   **Generate Domain** to get a public HTTPS URL like
+   `https://garmin-mcp-production.up.railway.app`.
+5. Go back to **Variables** and set `GARMIN_MCP_PUBLIC_URL` to that exact
+   URL (no trailing slash). Redeploy (Railway usually does this
+   automatically when a variable changes).
+6. Sanity check: `curl https://<your-domain>/health` should return `ok`.
+
+Garmin emails you about a week before your Personal API key expires;
+when it does, generate a new one and update the
+`GARMIN_PERSONAL_API_KEY` variable in Railway.
+
+### 2. Add it to claude.ai as a custom connector
+
+1. On claude.ai: **Settings → Connectors → Add custom connector**.
+2. Paste your Railway URL as the connector URL.
+3. Pick **Register automatically** for the OAuth client setup (Dynamic
+   Client Registration) — the server handles this itself, no manual
+   client ID/secret to create.
+4. Connecting will open a small login page asking for the access
+   password — the `GARMIN_MCP_ACCESS_PASSWORD` you set in Railway, not
+   your Garmin password. Enter it once; claude.ai stores the resulting
+   token and refreshes it automatically afterward.
+5. Add the connector to whichever Projects should use it (e.g. your
+   cycling coach Project) under that Project's connector settings.
+
+That's it — the 23 official-API tools are now reachable from claude.ai
+on web, desktop, and mobile.
+
+### How the login works, briefly
+
+There's no user database — you're the only real user. claude.ai
+registers itself as an OAuth client automatically (that's normal and
+expected; registering isn't the same as getting access). Getting an
+actual access token still requires your `GARMIN_MCP_ACCESS_PASSWORD` via
+the login page. Tokens and registered clients are kept in memory, not in
+a database, so a Railway restart or redeploy means reconnecting once
+(claude.ai will prompt you) — there's nothing durable to go stale or get
+out of sync.
+
 ## Testing without touching your real Garmin account
 
 ```bash
@@ -144,16 +226,28 @@ pip install -e ".[test]"
 pytest
 ```
 
-The test suite (`tests/test_server.py`) mocks out both backends
-entirely — it never logs in or hits a real API. It checks that every
-tool calls the right underlying method with the right arguments, that a
-missing key/session comes back as a normal `{"error": ...}` result
-instead of crashing the server, that an expired official-API access
-token is transparently refreshed and retried once, and that all 34
-tools register with the official ones unlabeled and the unofficial ones
-all starting with `(unofficial API)`. It's a fast sanity check — it does
-**not** replace actually running the setup steps above and trying a
-real tool call from Claude or Cursor.
+The test suite mocks out both backends entirely — it never logs in or
+hits a real API, Garmin or claude.ai. Two files:
+
+- `tests/test_server.py` — the local hybrid server. Checks that every
+  tool calls the right underlying method with the right arguments, that
+  a missing key/session comes back as a normal `{"error": ...}` result
+  instead of crashing the server, that an expired official-API access
+  token is transparently refreshed and retried once, and that all 34
+  tools register with the official ones unlabeled and the unofficial
+  ones all starting with `(unofficial API)`.
+- `tests/test_remote_server.py` — the remote server's OAuth flow, driven
+  through the real Starlette app (not just the provider in isolation):
+  dynamic client registration, the password-gated login page (including
+  a wrong-password attempt), PKCE code exchange, that an authorization
+  code can't be redeemed twice, refresh-token rotation invalidating the
+  old access token, bearer-token enforcement on the MCP endpoint, Host-
+  header validation, and that only the 23 official tools are registered
+  (no unofficial fallback, ever).
+
+It's a fast sanity check — it does **not** replace actually running the
+setup steps above and trying a real tool call from Claude, Cursor, or
+claude.ai.
 
 ## How it works
 
@@ -166,11 +260,21 @@ real tool call from Claude or Cursor.
 - `garmin_mcp/auth_unofficial.py` / `authenticate_unofficial.py` — the
   unofficial fallback path. Only `authenticate_unofficial.py` (run via
   `garmin-mcp-auth`) ever touches your email/password; the server itself
-  only ever resumes the cached session token.
-- `garmin_mcp/server.py` — the MCP server: one `async` tool per Garmin
-  data type, each running its blocking API call in a thread so the
-  server stays responsive, and each clearly routed to the official or
-  unofficial backend.
+  only ever resumes the cached session token. Not imported by the remote
+  server at all.
+- `garmin_mcp/tools_official.py` / `tools_unofficial.py` — the 23 and 11
+  tool implementations, as plain functions rather than tied to one
+  server instance, so the local and remote servers can register the
+  same official-tool code (`mcp.add_tool(fn)`) instead of maintaining
+  two copies.
+- `garmin_mcp/server.py` — the local, stdio MCP server: registers all 34
+  tools from the two modules above. Reachable only from the machine it
+  runs on.
+- `garmin_mcp/remote_auth.py` / `remote_server.py` — the remote, HTTP
+  MCP server: registers only the 23 official tools, plus a minimal
+  single-user OAuth 2.0 authorization server (Dynamic Client
+  Registration + a password-gated `/login` page) so a bearer token, not
+  just the URL, is what lets a client call it.
 
 ## Troubleshooting
 
@@ -190,6 +294,20 @@ real tool call from Claude or Cursor.
   condition) from API-delivered files. That's a Garmin-side limitation
   of the official API, not a bug here — it's part of why
   `get_max_metrics` still uses the unofficial fallback.
+- **claude.ai says it can't connect / the connector keeps failing** —
+  check `curl https://<your-domain>/health` returns `ok` first; if that
+  fails, check Railway's deploy logs for a missing-env-var error
+  (`garmin-mcp-remote-server` refuses to start without
+  `GARMIN_PERSONAL_API_KEY`, `GARMIN_MCP_PUBLIC_URL`, and
+  `GARMIN_MCP_ACCESS_PASSWORD` all set).
+- **The remote server's login page says the link expired** — pending
+  logins and issued tokens are kept in memory only, so a Railway
+  restart/redeploy clears them; just reconnect the connector in
+  claude.ai and log in again.
+- **A remote tool call fails but the same tool works locally** — the
+  remote server only has the official-API tools; if it's one of the 11
+  unofficial-fallback tools (see the table above), that's expected — use
+  the local `garmin-mcp-server` for those.
 
 ## License
 
