@@ -219,6 +219,38 @@ a database, so a Railway restart or redeploy means reconnecting once
 (claude.ai will prompt you) — there's nothing durable to go stale or get
 out of sync.
 
+### Unofficial fallback tools on the remote server (optional, higher risk)
+
+The 11 unofficial-fallback tools (see the warning above) are *registered*
+on the remote server too, but return `{"error": ...}` until you log in to
+Garmin's unofficial API there — deliberately a separate, opt-in step from
+deploying the server itself, because it means your Garmin email/password
+exist on a public host at least once, which is a meaningfully bigger risk
+than the official-API-only setup above. Think it through before doing
+this; a compromise of this server then means full Garmin account access,
+not just read-only fitness data. If you'd rather not, skip this section —
+everything else works exactly as described above.
+
+If you do want it:
+
+1. Visit `https://<your-domain>/admin/garmin-login`.
+2. Enter your `GARMIN_MCP_ACCESS_PASSWORD` (the same one from step 3
+   above — not your Garmin password) plus your Garmin email and
+   password. These go straight to this server over HTTPS, never through
+   Claude or claude.ai, and the server never writes the password to
+   disk, an env var, or a log line — only the resulting session is kept,
+   in memory.
+3. If Garmin challenges the login with an MFA code (likely, the first
+   time, since a cloud host's IP looks new to it), you'll get a second
+   form for the code it emailed or pushed to your Garmin Connect app.
+4. On success, the page shows an opaque session token. Memory-only means
+   a restart, redeploy, or (on Render's free tier) idle-spindown forgets
+   it and you'll need to revisit this page — if that's annoying, paste
+   that token into a `GARMIN_UNOFFICIAL_SESSION` environment variable and
+   redeploy; the server will resume it automatically from then on,
+   without needing your password again. Treat that token like a
+   password too: whoever has it can read your Garmin data.
+
 ## Testing without touching your real Garmin account
 
 ```bash

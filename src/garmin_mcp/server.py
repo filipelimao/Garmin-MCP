@@ -35,8 +35,14 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+from . import auth_unofficial
 from .tools_official import OFFICIAL_TOOLS
-from .tools_unofficial import UNOFFICIAL_TOOLS
+from .tools_unofficial import build_unofficial_tools
+
+#: Bound to the local, file-cached session (see auth_unofficial.py). The
+#: remote server builds its own copy of these same 11 tools bound to a
+#: different, in-memory session instead — see remote_server.py.
+UNOFFICIAL_TOOLS = build_unofficial_tools(auth_unofficial.get_client)
 
 mcp = MCPServer(
     name="garmin-connect",

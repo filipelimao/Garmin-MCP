@@ -15,11 +15,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from starlette.testclient import TestClient
 
+from garmin_mcp import remote_auth_unofficial
 from garmin_mcp.remote_server import build_server
 
 PUBLIC_URL = "https://garmin-mcp.example.test"
@@ -32,6 +34,55 @@ def remote_env(monkeypatch):
     monkeypatch.setenv("GARMIN_MCP_PUBLIC_URL", PUBLIC_URL)
     monkeypatch.setenv("GARMIN_MCP_ACCESS_PASSWORD", PASSWORD)
     monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "dummy-key-for-tests")
+    monkeypatch.delenv("GARMIN_UNOFFICIAL_SESSION", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_unofficial_session():
+    # remote_auth_unofficial's session/pending-MFA state is a process-wide
+    # global, so without this one test's login would leak into the next.
+    remote_auth_unofficial.reset_session()
+    yield
+    remote_auth_unofficial.reset_session()
+
+
+class _FakeGarminNoMFA:
+    """Stand-in for garminconnect.Garmin: logs in immediately, no MFA."""
+
+    def __init__(self, email: str | None = None, password: str | None = None, **_kwargs: object) -> None:
+        self.email = email
+        self.password = password
+        self.client = SimpleNamespace(dumps=lambda: '{"di_token": "fake"}')
+
+    def login(self, tokenstore: str | None = None) -> tuple[None, None]:
+        return None, None
+
+    def _load_profile_and_settings(self) -> None:
+        pass
+
+    def get_devices(self) -> list[dict[str, int]]:
+        return [{"deviceId": 1234}]
+
+
+class _FakeGarminMFA:
+    """Stand-in for garminconnect.Garmin: always demands MFA code "123456"."""
+
+    def __init__(self, email: str | None = None, password: str | None = None, **_kwargs: object) -> None:
+        self.email = email
+        self.password = password
+        self.client = SimpleNamespace(dumps=lambda: '{"di_token": "fake"}')
+
+    def login(self, tokenstore: str | None = None) -> tuple[str, dict[str, str]]:
+        return "needs_mfa", {"ticket": "abc"}
+
+    def resume_login(self, client_state: dict[str, str], mfa_code: str) -> tuple[str | None, None]:
+        assert client_state == {"ticket": "abc"}
+        if mfa_code == "123456":
+            return None, None
+        return "needs_mfa", None
+
+    def _load_profile_and_settings(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -131,14 +182,168 @@ def _full_login(client: TestClient, *, password: str = PASSWORD) -> dict[str, st
 
 
 @pytest.mark.asyncio
-async def test_remote_server_only_registers_official_tools(app):
+async def test_remote_server_registers_official_and_unofficial_tools(app):
     mcp, _starlette_app = app
     tools = await mcp.list_tools()
     names = {t.name for t in tools}
-    assert len(names) == 23
-    # none of the unofficial-fallback tools are present
-    assert "get_training_status" not in names
-    assert "get_max_metrics" not in names
+    # 23 official + 11 unofficial-fallback — the unofficial ones are always
+    # *registered* on the remote server now, they just error out until the
+    # owner logs in at /admin/garmin-login (see the tests below).
+    assert len(names) == 34
+    assert "get_training_status" in names
+    assert "get_max_metrics" in names
+    assert "list_devices" in names
+
+
+# --------------------------------------------------------------------------
+# Unofficial-fallback session (remote_auth_unofficial)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unofficial_tool_reports_no_session_before_login(app):
+    mcp, _starlette_app = app
+    tools = {t.name: t for t in await mcp.list_tools()}
+    assert "list_devices" in tools
+    from garmin_mcp.tools_unofficial import build_unofficial_tools
+
+    (list_devices_fn,) = [
+        fn for fn in build_unofficial_tools(remote_auth_unofficial.get_client) if fn.__name__ == "list_devices"
+    ]
+    result = await list_devices_fn()
+    assert "error" in result
+    assert "/admin/garmin-login" in result["error"]
+
+
+def test_start_login_no_mfa_establishes_session(monkeypatch):
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FakeGarminNoMFA)
+    status, pending_id = remote_auth_unofficial.start_login("me@example.test", "hunter2")
+    assert status == "ok"
+    assert pending_id is None
+    assert remote_auth_unofficial.has_session()
+    assert remote_auth_unofficial.get_client().get_devices() == [{"deviceId": 1234}]
+    assert remote_auth_unofficial.session_dump() == '{"di_token": "fake"}'
+
+
+def test_start_login_needs_mfa_then_complete_with_retry(monkeypatch):
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FakeGarminMFA)
+    status, pending_id = remote_auth_unofficial.start_login("me@example.test", "hunter2")
+    assert status == "needs_mfa"
+    assert pending_id
+    assert not remote_auth_unofficial.has_session()
+
+    # A wrong code doesn't burn the pending challenge — you can retry it.
+    with pytest.raises(remote_auth_unofficial.GarminAuthError):
+        remote_auth_unofficial.complete_mfa(pending_id, "000000")
+    assert not remote_auth_unofficial.has_session()
+
+    remote_auth_unofficial.complete_mfa(pending_id, "123456")
+    assert remote_auth_unofficial.has_session()
+
+    # The challenge is single-use once it succeeds.
+    with pytest.raises(remote_auth_unofficial.GarminAuthError):
+        remote_auth_unofficial.complete_mfa(pending_id, "123456")
+
+
+def test_complete_mfa_unknown_pending_id_raises():
+    with pytest.raises(remote_auth_unofficial.GarminAuthError):
+        remote_auth_unofficial.complete_mfa("nonexistent", "123456")
+
+
+def test_session_dump_without_session_raises():
+    with pytest.raises(remote_auth_unofficial.GarminAuthError):
+        remote_auth_unofficial.session_dump()
+
+
+def test_resume_from_env_restores_session(monkeypatch):
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FakeGarminNoMFA)
+    monkeypatch.setenv("GARMIN_UNOFFICIAL_SESSION", '{"di_token": "fake"}')
+    assert remote_auth_unofficial.resume_from_env() is True
+    assert remote_auth_unofficial.has_session()
+
+
+def test_resume_from_env_without_env_var_is_a_noop(monkeypatch):
+    monkeypatch.delenv("GARMIN_UNOFFICIAL_SESSION", raising=False)
+    assert remote_auth_unofficial.resume_from_env() is False
+    assert not remote_auth_unofficial.has_session()
+
+
+def test_resume_from_env_with_bad_token_is_a_noop(monkeypatch):
+    class _FailsToLoad(_FakeGarminNoMFA):
+        def login(self, tokenstore: str | None = None) -> tuple[None, None]:
+            raise RuntimeError("stale token")
+
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FailsToLoad)
+    monkeypatch.setenv("GARMIN_UNOFFICIAL_SESSION", '{"di_token": "stale"}')
+    assert remote_auth_unofficial.resume_from_env() is False
+    assert not remote_auth_unofficial.has_session()
+
+
+# --------------------------------------------------------------------------
+# /admin/garmin-login page
+# --------------------------------------------------------------------------
+
+
+def test_admin_garmin_login_page_loads(client):
+    resp = client.get("/admin/garmin-login")
+    assert resp.status_code == 200
+    assert "Garmin Connect email" in resp.text
+
+
+def test_admin_garmin_login_rejects_wrong_access_password(client):
+    resp = client.post(
+        "/admin/garmin-login",
+        data={"access_password": "nope", "garmin_email": "me@example.test", "garmin_password": "hunter2"},
+    )
+    assert resp.status_code == 401
+    assert not remote_auth_unofficial.has_session()
+
+
+def test_admin_garmin_login_full_flow_enables_unofficial_tool(client, monkeypatch):
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FakeGarminNoMFA)
+
+    resp = client.post(
+        "/admin/garmin-login",
+        data={"access_password": PASSWORD, "garmin_email": "me@example.test", "garmin_password": "hunter2"},
+    )
+    assert resp.status_code == 200
+    assert "Connected" in resp.text
+    assert "di_token" in resp.text  # the optional persistence blob (HTML-escaped)
+    assert remote_auth_unofficial.has_session()
+
+    # The same session the admin page just established is what the
+    # registered tool functions resolve through (see
+    # test_unofficial_tool_reports_no_session_before_login for the "before"
+    # half of this story).
+    assert remote_auth_unofficial.get_client().get_devices() == [{"deviceId": 1234}]
+
+
+def test_admin_garmin_login_mfa_flow(client, monkeypatch):
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FakeGarminMFA)
+
+    start = client.post(
+        "/admin/garmin-login",
+        data={"access_password": PASSWORD, "garmin_email": "me@example.test", "garmin_password": "hunter2"},
+    )
+    assert start.status_code == 200
+    assert "MFA code" in start.text
+    pending_id = start.text.split('name="pending_id" value="')[1].split('"')[0]
+    assert pending_id
+
+    wrong = client.post(
+        "/admin/garmin-login",
+        data={"access_password": PASSWORD, "pending_id": pending_id, "mfa_code": "000000"},
+    )
+    assert wrong.status_code == 401
+    assert not remote_auth_unofficial.has_session()
+
+    right = client.post(
+        "/admin/garmin-login",
+        data={"access_password": PASSWORD, "pending_id": pending_id, "mfa_code": "123456"},
+    )
+    assert right.status_code == 200
+    assert "Connected" in right.text
+    assert remote_auth_unofficial.has_session()
 
 
 def test_missing_required_env_raises(monkeypatch):
