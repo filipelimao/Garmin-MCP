@@ -37,7 +37,9 @@ def remote_env(monkeypatch):
 @pytest.fixture
 def app(remote_env):
     mcp, transport_security = build_server()
-    return mcp, mcp.streamable_http_app(transport_security=transport_security)
+    # Matches main()'s streamable_http_path="/" — claude.ai's custom-connector
+    # UI posts to exactly the URL you give it, not a "/mcp" sub-path.
+    return mcp, mcp.streamable_http_app(transport_security=transport_security, streamable_http_path="/")
 
 
 @pytest.fixture
@@ -185,7 +187,7 @@ def test_wrong_password_is_rejected_and_code_not_issued(client):
 def test_full_login_issues_working_bearer_token(client):
     tokens = _full_login(client)
     resp = client.post(
-        "/mcp",
+        "/",
         json={
             "jsonrpc": "2.0",
             "id": 1,
@@ -214,10 +216,10 @@ def test_mcp_endpoint_rejects_missing_or_garbage_token(client):
     }
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 
-    no_token = client.post("/mcp", json=init_body, headers=headers)
+    no_token = client.post("/", json=init_body, headers=headers)
     assert no_token.status_code == 401
 
-    garbage_token = client.post("/mcp", json=init_body, headers={**headers, "Authorization": "Bearer garbage"})
+    garbage_token = client.post("/", json=init_body, headers={**headers, "Authorization": "Bearer garbage"})
     assert garbage_token.status_code == 401
 
 
@@ -300,12 +302,12 @@ def test_refresh_token_rotates_and_old_access_token_stops_working(client):
     assert new_access_token != tokens["access_token"]
 
     old_token_call = client.post(
-        "/mcp", json=init_body, headers={**headers, "Authorization": f"Bearer {tokens['access_token']}"}
+        "/", json=init_body, headers={**headers, "Authorization": f"Bearer {tokens['access_token']}"}
     )
     assert old_token_call.status_code == 401
 
     new_token_call = client.post(
-        "/mcp", json=init_body, headers={**headers, "Authorization": f"Bearer {new_access_token}"}
+        "/", json=init_body, headers={**headers, "Authorization": f"Bearer {new_access_token}"}
     )
     assert new_token_call.status_code == 200
 
@@ -313,7 +315,7 @@ def test_refresh_token_rotates_and_old_access_token_stops_working(client):
 def test_spoofed_host_header_is_rejected(client):
     tokens = _full_login(client)
     resp = client.post(
-        "/mcp",
+        "/",
         json={
             "jsonrpc": "2.0",
             "id": 1,

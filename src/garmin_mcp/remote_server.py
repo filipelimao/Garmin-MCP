@@ -109,9 +109,11 @@ def build_server() -> tuple[MCPServer, TransportSecuritySettings]:
 
     build_login_routes(mcp, provider)
 
-    @mcp.custom_route("/", methods=["GET"])
-    async def root(_request: Request) -> Response:
-        return PlainTextResponse("garmin-connect-mcp (remote, official-API-only). See /.well-known/oauth-authorization-server.")
+    # The MCP endpoint itself is mounted at "/" (see streamable_http_path in
+    # main()/build_server() callers below), matching the bare URL claude.ai's
+    # custom-connector UI expects you to paste in — not "/mcp". A custom route
+    # for GET "/" here would never be reached anyway, since Starlette matches
+    # the MCP endpoint's route (registered first, any method) before this one.
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> Response:
@@ -140,6 +142,10 @@ def main() -> None:
         host="0.0.0.0",
         port=port,
         transport_security=transport_security,
+        # claude.ai's custom-connector UI posts MCP messages to exactly the URL
+        # you give it (the bare https://your-domain, no "/mcp" suffix), so the
+        # endpoint has to live at "/" rather than the SDK's "/mcp" default.
+        streamable_http_path="/",
     )
 
 
