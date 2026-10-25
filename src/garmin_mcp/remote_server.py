@@ -1,5 +1,6 @@
 """Remote (HTTP) MCP server — official Garmin Personal API tools by
-default, with the 11 unofficial-fallback tools available as an opt-in.
+default, with the unofficial-fallback and workout tools available as an
+opt-in.
 
 This is the server meant to be deployed somewhere public (Railway, Render,
 etc.) so claude.ai can reach it from your phone, not just from a Desktop
@@ -12,8 +13,10 @@ the local hybrid server in server.py:
   remote_auth.py): claude.ai registers itself automatically, but minting
   an actual access token still requires your own `GARMIN_MCP_ACCESS_PASSWORD`
   — a password you choose for this server, unrelated to Garmin.
-- The 11 unofficial-fallback tools (see tools_unofficial.py) are also
-  always *registered*, but only work once you've logged in to Garmin's
+- The 11 unofficial-fallback read tools (see tools_unofficial.py) and the
+  9 workout creation/scheduling/push tools (see tools_workouts.py — these
+  write to your account, unlike everything else here) are also always
+  *registered*, but only work once you've logged in to Garmin's
   unofficial API at this server's own `/admin/garmin-login` page (gated by
   the same `GARMIN_MCP_ACCESS_PASSWORD`). Until then they return a clear
   `{"error": ...}` telling you so. Your Garmin email/password are typed
@@ -63,6 +66,7 @@ from .remote_auth import SingleUserOAuthProvider, build_login_routes
 from .remote_auth_unofficial import build_garmin_login_routes
 from .tools_official import OFFICIAL_TOOLS
 from .tools_unofficial import build_unofficial_tools
+from .tools_workouts import build_workout_tools
 
 
 class _ConfigError(RuntimeError):
@@ -104,9 +108,12 @@ def build_server() -> tuple[MCPServer, TransportSecuritySettings]:
             "starts with '(unofficial API)' — falls back to an unofficial library for "
             "data Garmin hasn't exposed officially yet (training status/readiness, VO2 "
             "max, race predictions, personal records, devices, activity splits/laps/"
-            "weather/gear, respiration), and only works once this server's owner has "
-            "logged in at its /admin/garmin-login page. Dates are ISO 'YYYY-MM-DD' "
-            "strings; omit a date argument to default to today. If a tool returns an "
+            "weather/gear, respiration), plus a set of workout tools (create/list/get/"
+            "delete a structured workout, schedule it, push it to a device) that write "
+            "to the account rather than just reading it. Both groups only work once "
+            "this server's owner has logged in at its /admin/garmin-login page. Dates "
+            "are ISO 'YYYY-MM-DD' strings; omit a date argument to default to today. "
+            "If a tool returns an "
             "{'error': ...} object mentioning a missing/expired key or session, tell the "
             "user: the official Personal API key needs refreshing, or the unofficial "
             "session needs re-establishing at /admin/garmin-login — whichever the error "
@@ -129,6 +136,8 @@ def build_server() -> tuple[MCPServer, TransportSecuritySettings]:
     for fn in OFFICIAL_TOOLS:
         mcp.add_tool(fn)
     for fn in build_unofficial_tools(remote_auth_unofficial.get_client):
+        mcp.add_tool(fn)
+    for fn in build_workout_tools(remote_auth_unofficial.get_client):
         mcp.add_tool(fn)
 
     # Pick up a session saved from a previous /admin/garmin-login visit, if

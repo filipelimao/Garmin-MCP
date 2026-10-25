@@ -19,6 +19,11 @@ This is a **hybrid** server, because Garmin's official Personal API
   `garmin-mcp-auth`. Every such tool's docstring starts with
   "(unofficial API)" so it's always clear which backend is in play. See
   auth_unofficial.py / tools_unofficial.py for the caveats that come with it.
+- Workout creation/scheduling/push (create a structured workout, list/get/
+  delete one, schedule it on the calendar, push it to a device) also
+  isn't covered by the official Personal API, so it uses the same
+  unofficial session as above. Unlike every other tool here, these write
+  to the account rather than just reading it. See tools_workouts.py.
 
 You only need to set up the backend(s) a tool you actually want to use
 requires — if you never call an unofficial-API tool, you never need to
@@ -38,11 +43,17 @@ from mcp.server.mcpserver import MCPServer
 from . import auth_unofficial
 from .tools_official import OFFICIAL_TOOLS
 from .tools_unofficial import build_unofficial_tools
+from .tools_workouts import build_workout_tools
 
 #: Bound to the local, file-cached session (see auth_unofficial.py). The
-#: remote server builds its own copy of these same 11 tools bound to a
+#: remote server builds its own copy of these same tools bound to a
 #: different, in-memory session instead — see remote_server.py.
 UNOFFICIAL_TOOLS = build_unofficial_tools(auth_unofficial.get_client)
+
+#: Workout creation/scheduling/push tools (see tools_workouts.py) — same
+#: unofficial-API session as UNOFFICIAL_TOOLS above, kept in their own
+#: module since they write to the account rather than just reading it.
+WORKOUT_TOOLS = build_workout_tools(auth_unofficial.get_client)
 
 mcp = MCPServer(
     name="garmin-connect",
@@ -53,17 +64,22 @@ mcp = MCPServer(
         "back to an unofficial library for data Garmin hasn't exposed "
         "officially yet (training status/readiness, VO2 max, race "
         "predictions, personal records, devices, activity splits/laps/"
-        "weather/gear, respiration). Dates are ISO 'YYYY-MM-DD' strings; "
-        "omit a date argument to default to today. If a tool returns an "
+        "weather/gear, respiration), plus a set of workout tools "
+        "(create/list/get/delete a structured workout, schedule it, push "
+        "it to a device) that write to the account rather than just "
+        "reading it. Dates are ISO 'YYYY-MM-DD' strings; omit a date "
+        "argument to default to today. If a tool returns an "
         "{'error': ...} object mentioning a missing key/session, tell "
         "the user to run `garmin-mcp-save-key` (official tools) or "
-        "`garmin-mcp-auth` (unofficial tools) and try again."
+        "`garmin-mcp-auth` (unofficial/workout tools) and try again."
     ),
 )
 
 for _fn in OFFICIAL_TOOLS:
     mcp.add_tool(_fn)
 for _fn in UNOFFICIAL_TOOLS:
+    mcp.add_tool(_fn)
+for _fn in WORKOUT_TOOLS:
     mcp.add_tool(_fn)
 
 

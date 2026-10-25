@@ -297,6 +297,120 @@ async def test_unofficial_docstrings_are_labeled():
 
 
 # --------------------------------------------------------------------------
+# Workout tools (write to the account; see tools_workouts.py)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_cached_session_returns_error_not_crash_for_workout_tools(monkeypatch, tmp_path):
+    monkeypatch.setattr(auth_unofficial, "_client", None)
+    monkeypatch.setattr(auth_unofficial, "DEFAULT_TOKENSTORE", str(tmp_path / "does-not-exist"))
+    out = await _call("list_workouts")
+    assert "error" in out
+    assert "garmin-mcp-auth" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_workout_no_arg_tools(fake_unofficial):
+    for tool, method in [
+        ("get_workout_types", "get_workout_types"),
+        ("send_scheduled_workouts_to_devices", "send_scheduled_workouts_to_devices"),
+    ]:
+        out = await _call(tool)
+        assert out["method"] == method
+        assert out["args"] == []
+
+
+@pytest.mark.asyncio
+async def test_workout_id_tools_pass_id(fake_unofficial):
+    for tool, method in [
+        ("get_workout", "get_workout_by_id"),
+        ("delete_workout", "delete_workout"),
+    ]:
+        out = await _call(tool, workout_id="999")
+        assert out["method"] == method
+        assert out["args"] == ["999"]
+
+
+@pytest.mark.asyncio
+async def test_list_workouts_default_limit(fake_unofficial):
+    out = await _call("list_workouts")
+    assert out["method"] == "get_workouts"
+    assert out["kwargs"] == {"limit": 100}
+
+
+@pytest.mark.asyncio
+async def test_schedule_workout_passes_id_and_date(fake_unofficial):
+    out = await _call("schedule_workout", workout_id="999", date="2026-11-01")
+    assert out["method"] == "schedule_workout"
+    assert out["args"] == ["999", "2026-11-01"]
+
+
+@pytest.mark.asyncio
+async def test_push_workout_to_device_defaults(fake_unofficial):
+    out = await _call("push_workout_to_device")
+    assert out["method"] == "push_workout_to_device"
+    assert out["args"] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_create_workout_passes_raw_json(fake_unofficial):
+    workout = {"workoutName": "custom"}
+    out = await _call("create_workout", workout_json=workout)
+    assert out["method"] == "upload_workout"
+    assert out["args"] == [workout]
+
+
+@pytest.mark.asyncio
+async def test_create_simple_interval_workout_uploads_built_json(fake_unofficial):
+    out = await _call(
+        "create_simple_interval_workout",
+        sport="running",
+        name="6x800",
+        repeats=6,
+        work_minutes=3,
+        recovery_minutes=2,
+        warmup_minutes=10,
+        cooldown_minutes=5,
+        work_target="heart_rate_zone",
+        work_zone_number=4,
+    )
+    assert out["method"] == "upload_workout"
+    (workout_json,) = out["args"]
+    assert workout_json["workoutName"] == "6x800"
+    assert workout_json["sportType"]["sportTypeKey"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_create_simple_interval_workout_bad_input_is_an_error_not_a_crash(fake_unofficial):
+    out = await _call("create_simple_interval_workout", sport="walking", name="x", repeats=1)
+    assert "error" in out
+    assert "ValueError" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_workout_docstrings_are_labeled():
+    tools = await server.mcp.list_tools()
+    workout_names = {
+        "get_workout_types",
+        "create_simple_interval_workout",
+        "create_workout",
+        "list_workouts",
+        "get_workout",
+        "delete_workout",
+        "schedule_workout",
+        "push_workout_to_device",
+        "send_scheduled_workouts_to_devices",
+    }
+    found = set()
+    for tool in tools:
+        if tool.name in workout_names:
+            found.add(tool.name)
+            assert tool.description.strip().startswith("(unofficial API)"), tool.name
+    assert found == workout_names
+
+
+# --------------------------------------------------------------------------
 # Overall registration
 # --------------------------------------------------------------------------
 
@@ -304,4 +418,5 @@ async def test_unofficial_docstrings_are_labeled():
 @pytest.mark.asyncio
 async def test_all_tools_are_registered():
     tools = await server.mcp.list_tools()
-    assert len(tools) == 34
+    # 23 official + 11 unofficial-fallback (read-only) + 9 workout tools.
+    assert len(tools) == 43

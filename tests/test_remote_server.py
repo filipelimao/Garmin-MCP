@@ -63,6 +63,12 @@ class _FakeGarminNoMFA:
     def get_devices(self) -> list[dict[str, int]]:
         return [{"deviceId": 1234}]
 
+    def get_workouts(self, start: int = 0, limit: int = 100, **_kwargs: object) -> list[dict[str, str]]:
+        return [{"workoutId": "999", "workoutName": "fake workout"}]
+
+    def upload_workout(self, workout_json: object) -> dict[str, str]:
+        return {"workoutId": "999"}
+
 
 class _FakeGarminMFA:
     """Stand-in for garminconnect.Garmin: always demands MFA code "123456"."""
@@ -186,13 +192,24 @@ async def test_remote_server_registers_official_and_unofficial_tools(app):
     mcp, _starlette_app = app
     tools = await mcp.list_tools()
     names = {t.name for t in tools}
-    # 23 official + 11 unofficial-fallback — the unofficial ones are always
-    # *registered* on the remote server now, they just error out until the
-    # owner logs in at /admin/garmin-login (see the tests below).
-    assert len(names) == 34
+    # 23 official + 11 unofficial-fallback (read-only) + 9 workout tools
+    # (create/list/get/delete/schedule/push) — all of the unofficial ones
+    # are always *registered* on the remote server now, they just error
+    # out until the owner logs in at /admin/garmin-login (see the tests
+    # below).
+    assert len(names) == 43
     assert "get_training_status" in names
     assert "get_max_metrics" in names
     assert "list_devices" in names
+    assert "create_simple_interval_workout" in names
+    assert "create_workout" in names
+    assert "list_workouts" in names
+    assert "get_workout" in names
+    assert "delete_workout" in names
+    assert "schedule_workout" in names
+    assert "push_workout_to_device" in names
+    assert "send_scheduled_workouts_to_devices" in names
+    assert "get_workout_types" in names
 
 
 # --------------------------------------------------------------------------
@@ -213,6 +230,52 @@ async def test_unofficial_tool_reports_no_session_before_login(app):
     result = await list_devices_fn()
     assert "error" in result
     assert "/admin/garmin-login" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_workout_tool_reports_no_session_before_login(app):
+    mcp, _starlette_app = app
+    tools = {t.name: t for t in await mcp.list_tools()}
+    assert "list_workouts" in tools
+    from garmin_mcp.tools_workouts import build_workout_tools
+
+    (list_workouts_fn,) = [
+        fn for fn in build_workout_tools(remote_auth_unofficial.get_client) if fn.__name__ == "list_workouts"
+    ]
+    result = await list_workouts_fn()
+    assert "error" in result
+    assert "/admin/garmin-login" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_workout_tool_works_after_login(monkeypatch):
+    monkeypatch.setattr(remote_auth_unofficial, "Garmin", _FakeGarminNoMFA)
+    status, _pending_id = remote_auth_unofficial.start_login("me@example.test", "hunter2")
+    assert status == "ok"
+
+    from garmin_mcp.tools_workouts import build_workout_tools
+
+    tools = {fn.__name__: fn for fn in build_workout_tools(remote_auth_unofficial.get_client)}
+    result = await tools["list_workouts"]()
+    assert result == [{"workoutId": "999", "workoutName": "fake workout"}]
+
+    result = await tools["create_simple_interval_workout"](
+        sport="running",
+        name="6x800",
+        repeats=6,
+        work_minutes=3,
+        recovery_minutes=2,
+        warmup_minutes=10,
+        cooldown_minutes=5,
+        work_target="heart_rate_zone",
+        work_zone_number=4,
+    )
+    assert result == {"workoutId": "999"}
+
+    # Bad input surfaces as the same {"error": ...} shape, never an exception.
+    result = await tools["create_simple_interval_workout"](sport="walking", name="x", repeats=1)
+    assert "error" in result
+    assert "ValueError" in result["error"]
 
 
 def test_start_login_no_mfa_establishes_session(monkeypatch):
